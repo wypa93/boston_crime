@@ -1,0 +1,281 @@
+---
+title: "2021 Boston Crimes Analysis"
+output: prettydoc::html_pretty
+vignette: >
+  %\VignetteIndexEntry{Vignette Title}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEngine{knitr::opts_chunk$set(fig.width=12, fig.height=8) }
+  %\VignetteEncoding{UTF-8}
+---
+
+
+```{r,include=FALSE}
+library(plotly)
+library(heatmaply)
+library(pracma)
+library(mltools)
+library(glmnet)
+library(data.table)
+options(scipen=0)
+defaultW <- getOption("warn") 
+options(warn = -1) 
+```
+
+## Introudction
+
+**Context:** Understanding patterns in crime rates is a topic of major interest for policymakers and law enforcement. Whereas research historically focused on socio-demographics such as age, gender, or socio-economic status, modern approaches also consider contextual factors to criminal behavior. More recently, weather parameters such as temperature, precipitation, or wind speed were found to play a pivotal role in understanding crimes. Crime rates of major US cities and regions correlate significantly with temperature. This project investigates the weather impact on Boston crime rates by applying correlation analysis, significance tests, and linear regression.
+
+**Research Question:** This project investigates the extent to which weather parameters can explain variation in daily crimes in Boston in 2021. Furthermore, weekly, monthly, and annual patterns are researched.
+
+**Data & Processing Steps:** Data from two sources are combined, standardized (z-score), and detrended before statistical testing. First, to calculate daily crime rates, the API of the Boston Police Department is called for the timespan between January 1st and December 31st, 2021. The time-series data is then joined with weather data requested through the national oceanic and atmospheric administration NOAA. The final dataset consists of 365 entries containing daily records of crime rates, average temperature, rain- and snowfall, and wind speed. The two additional data fields 'day-of-week' and 'day-of-month', are added to investigate weekly or monthly patterns. The data retrieved from the Boston Police Department further includes the category of registered incidents and their geo-location. Several incident types are removed from the dataset as they are not criminal offenses (e.g., Medical Assistance). 
+
+**References:**
+
+* Crime Incident Reports BPD https://data.boston.gov/
+* NCDC NOAA Climate Data https://www.ncdc.noaa.gov/
+
+
+```{r, include= FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+filepath1 <- 'https://data.boston.gov/dataset/6220d948-eae2-4e4b-8723-2dc8e67722a3/resource/f4495ee9-c42c-4019-82c1-d067f07e45d2/download/tmp7_f32p54.csv'
+filepath2 <- '/Volumes/GoogleDrive-102997753827377759915/My Drive/Boston University /CS555_Visualization/Project/weather_data.csv'
+crime_data <- read.csv(filepath1)
+weather_data <- read.csv(filepath2)
+#Note: Abbreviations for Weather Parameters https://www.weather.gov/ict/f6decode
+
+############## transform weather data ############## 
+weather_data$DATE <- as.Date(weather_data$DATE)
+rownames(weather_data) <- weather_data$DATE
+weather_data <- weather_data[c('DATE','AWND','TAVG','PRCP','SNOW')]
+weather_df <- subset(weather_data,((weather_data$DATE > '2020-12-31') & (weather_data$DATE <= '2021-12-31')))
+weather_df = weather_df[-c(1)]
+
+############## transform crime data ##############
+crime_data<- crime_data[(crime_data$OFFENSE_DESCRIPTION != c('INVESTIGATE PERSON')),]
+crime_data<- crime_data[(crime_data$OFFENSE_DESCRIPTION != c('SICK ASSIST')),]
+crime_data<- crime_data[(crime_data$OFFENSE_DESCRIPTION != c('SICK ASSIST - DRUG RELATED ILLNESS')),]
+crime_data<- crime_data[(crime_data$OFFENSE_DESCRIPTION != c('SICK/INJURED/MEDICAL - PERSON')),]
+crime_data<- crime_data[(crime_data$OFFENSE_DESCRIPTION != c('TOWED MOTOR VEHICLE')),]
+crime_data<- crime_data[(crime_data$OFFENSE_DESCRIPTION != c('INVESTIGATE PROPERTY')),]
+crime_data<- crime_data[(crime_data$OFFENSE_DESCRIPTION != c('MISSING PERSON - LOCATED')),]
+crime_data<- crime_data[(crime_data$OFFENSE_DESCRIPTION != c('MISSING PROPERTY - FOUND')),]
+crime_data<- crime_data[(crime_data$OFFENSE_DESCRIPTION != c('PROPERTY - FOUND')),]
+crime_data<- crime_data[(crime_data$OFFENSE_DESCRIPTION != c('M/V ACCIDENT - OTHER')),]
+crime_data<- crime_data[(crime_data$OFFENSE_DESCRIPTION != c('M/V ACCIDENT - PERSONAL INJURY')),]
+crime_data<- crime_data[(crime_data$OFFENSE_DESCRIPTION != c('M/V ACCIDENT - PROPERTY DAMAGE')),]
+
+
+
+
+crime_data$DATE <- as.Date(crime_data$OCCURRED_ON_DATE)
+#rownames(crime_data) <- crime_data$DATE
+crime_df <- data.frame(table(crime_data$DATE))
+rownames(crime_df) <-crime_df$Var1
+crime_df <- crime_df[c('Freq')]
+names(crime_df)[names(crime_df) == 'Freq'] <- 'CRIMES'
+
+############## merge crime and weather data and standardize/detrend values ##############
+full_df <- cbind(weather_df,crime_df)
+nrow(full_df)
+
+#standardization using z-score
+zscore_norm <- function(x) {
+  (x - mean(x)) / (sd(x))
+}
+df_norm0 <- as.data.frame(lapply(full_df[1:5], zscore_norm))
+head(df_norm0)
+rownames(df_norm0) <- rownames(full_df)
+df_norm <-df_norm0
+
+# detrended
+df_norm$TAVG<-detrend(df_norm0$TAVG)
+df_norm$PRCP<-detrend(df_norm0$PRCP)
+df_norm$CRIMES<-detrend(df_norm0$CRIMES)
+
+#time data
+date <- as.Date(rownames(df_norm))
+weekdays <- weekdays(as.Date(rownames(df_norm)))
+month <- months(as.Date(rownames(df_norm)))
+dayofmonth <- format(as.Date(rownames(df_norm),format="%Y-%m-%d"), format = "%d")
+
+#weekdays one hot
+wdays <- as.factor(weekdays)
+wdays <- one_hot(as.data.table(wdays))
+time_df <- data.frame(weekdays,month,dayofmonth,wdays)
+rownames(time_df) <- date
+time_norm_df <- merge(time_df,df_norm)
+head(time_norm_df)
+```
+
+
+
+## Which were the Top 20 Crimes in 2021?
+```{r,echo=FALSE}
+#crime frequency by type
+frequency <- data.frame(sort(table(crime_data$OFFENSE_DESCRIPTION),decreasing = TRUE))
+plot_ly(data=frequency[c(1:20),],y=~Var1,x=~Freq,type = 'bar')%>%
+  layout(title='Crimes by Offense Code')
+```
+
+
+
+## Where were these criminal offenses reported?
+
+When analyzing the Geo-Locations of the incidents in 2021, it shows that more cases were registered in denser areas in the city center.
+```{r,echo=FALSE}
+fig <- crime_data
+fig <- fig %>%
+  plot_ly(
+    lat = ~Lat,
+    lon = ~Long,
+    marker = list(color = "fuchsia"),
+    mode='markers',
+    type = 'scattermapbox',
+    hovertext = crime_data[,"OFFENSE_DESCRIPTION"]) 
+fig <- fig %>%
+  layout(
+    mapbox = list(
+      style = 'open-street-map',
+      zoom =10,
+      title = 'Criminal offenses by Location',
+      center = list(lon = -71.067421, lat =  42.364758))) 
+fig
+```
+
+
+
+## How did the case numbers evolve throughout 2021?
+
+The time series shows a typical cyclic pattern found in other cities and regions. Crimes tend to be higher during the summer months and decrease towards winter. Sudden Drops can be seen in December around Christmas.
+```{r,echo=FALSE}
+plot_ly(data=crime_df,y=~CRIMES,x=rownames(df_norm),type = 'scatter',mode = 'lines',name='Crimes')%>%
+  layout(title='Crimes by Day of Year (2021)')
+```
+
+
+
+## Is there a monthly patterns?
+
+The crime rates do not indicate a clear monthly pattern. However, crimes during the first day of the month appear to be substantially higher than the average.
+```{r,echo=FALSE}
+#time series visualization throughout by day of month
+plot_ly(data=df_norm,y=~CRIMES,x=~dayofmonth,type = 'box',name='Crimes')%>%
+  layout(title='Crimes by Day of Month (2021)')
+```
+
+
+
+## Is there a weekly pattern?
+
+The box plots indicate that crimes may happen more frequently on Fridays and less frequently on Sundays. The rate appears to behave stable throughout the workweek.
+```{r,echo=FALSE}
+#time series visualization throughout by day of week
+xform <- list(categoryorder = "array",
+              categoryarray = c("Monday", "Tuesday", "Wednesday",'Thursday','Friday','Saturday','Sunday'))
+plot_ly(data=df_norm,y=~CRIMES,x=~weekdays,type = 'box',name='Crimes')%>%
+  layout(title='Crimes by Weekday (2021)',xaxis=xform)
+```
+
+
+
+## Could the weather have any influence on the number of crimes happening in Boston?
+
+The two parameters seem to show a similar pattern when considering crime rates and average daily temperature.
+```{r,echo=FALSE}
+plot_ly(data=df_norm,y=~CRIMES,x=rownames(df_norm),type = 'scatter',mode = 'lines',name='Crimes')%>%
+  add_trace(data=df_norm,y=~TAVG,x=rownames(df_norm),type = 'scatter',mode = 'lines',name='avg. Temp')%>%
+  add_trace(data=df_norm,y=~PRCP,x=rownames(df_norm),type = 'scatter',mode = 'lines',name='Percipitation')%>%
+  add_trace(data=df_norm,y=~AWND,x=rownames(df_norm),type = 'scatter',mode = 'lines',name='avg. Wind')%>%
+  layout(title='Weather parameters on Crime')
+```
+
+
+
+## How are weather parameters and crimes distributed?
+```{r,echo=FALSE}
+#distribution of parametric values
+plot_ly(data=df_norm0,y=~TAVG,type = 'box',name = 'Temperature')%>%
+  add_trace(data=df_norm0,y=~AWND,type = 'box',name = 'Wind')%>%
+  add_trace(data=df_norm0,y=~PRCP,type = 'box',name = 'Percipitation')%>%
+  add_trace(data=df_norm0,y=~SNOW,type = 'box',name = 'Snow')%>%
+  add_trace(data=df_norm0,y=~CRIMES,type = 'box',name = 'Crimes')%>%
+  layout(title='Distribution')
+```
+
+
+
+## Are weather parameters and crime cases correlated?
+
+**Inference:** Average daily temperature (TAVG) strongly correlates with daily crimes (CRIME). There is no evidence for multicollinearity among the independent variables.
+```{r,echo=FALSE}
+#correlation analysis and heatmap
+heatmaply(cor(df_norm),cellnote = cor(df_norm))
+```
+
+
+
+## Let's take a closer look at the relationship between Crimes and daily average Temperature (TAVG). Is the relationship significant (alpha = 0.05)?
+
+**Inference:** The small p-value suggests that the correlation between average daily temperature and crimes is significant on an alpha level of 0.05.
+```{r,echo=FALSE}
+#investigate correlation between TAVG and Crimes
+plot_ly(data=df_norm0,x=~TAVG,y=~CRIMES,type='scatter',mode='markers')%>%
+  layout(title='Association between daily average temperature and crime incidents')
+cor.test(x=df_norm0$TAVG,y=df_norm0$CRIMES)
+```
+
+
+
+## Do crimes happen more often on particular weekdays? (Global F-Test)
+
+**Inference:** F-Critical (2.123923) < F-value (6.809) -> reject H0 -> there are significant differences among the weekdays
+```{r,echo=FALSE}
+aov_df <- cbind(df_norm,weekdays)
+#ANOVA by IQ - H0: mu1 = mu2 = mu3 = m4 = m5 = m6 = m7
+m1<- aov(aov_df$CRIMES~aov_df$weekdays, data=aov_df)
+summary(m1)
+
+fc <- round(qf(0.95,df1=6,df2=358),2)
+print(paste0('F-critical: ',fc))
+```
+
+
+
+## Which weekdays are significantly different from others? (Pairwise t-test)
+
+**Inference:** Friday-Thursday, Friday-Saturday, Sunday-Saturday, and Sunday-Monday appear to be the succeeding weekday-pairs with the greatest difference.
+```{r,echo=FALSE}
+#Pairwise t.test IQ - H0: mu0 = M1, m1 = m2, m0 = m2
+#qt(0.975,df=nrow(aov_df)-ncol(aov_df)-1)
+pairwise.t.test(aov_df$CRIMES,aov_df$weekdays, p.adj="none")
+```
+
+
+
+## Which factors help to explain variablility in crime rates?
+
+**Inference:** The model explains about 40% of the variation in daily crimes. The binary label 'isSunday' is the greatest negative estimator, whereas temperature (TAVG) is the strongest positive estimator. Wind and Snow do not seem to be contributing significant contributors and shall be removed from the model.
+```{r,echo=FALSE}
+isSunday <- wdays$wdays_Sunday
+isFriday <- wdays$wdays_Friday
+reg_df <- cbind(isSunday,isFriday,df_norm)
+rownames(reg_df) <- c(1:365)
+model <- lm(CRIMES~.,data=reg_df)
+summary(model)
+```
+
+
+
+## Applying backward feature elimination to model parameter to find best estimator subset
+
+**Inference:** The AIC improved from 201.91 to 203.39 after removing both parameters Wind and Snow. Further the F-statistic increased substantially, whereas the Adj. R^2 only experienced a minor decrease.
+```{r,echo=FALSE}
+newModel1 = step(model, direction="backward")
+summary(newModel1)
+```
+
+
+
+## Conclusion
+The statistical analysis of weather and crime data has shown a significant association between Boston's average daily temperatures, precipitation, and crimes rate. Moreover, a weekly pattern in crimes was found, indicating that more crimes are happening on Friday night, whereas fewer cases are reported on Sundays. The linear regression model, including the parameters named above, explained about 40% of the variability in crimes. Future research may investigate whether these associations are more substantial in particular areas within Boston.
